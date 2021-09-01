@@ -4,9 +4,9 @@
 ## How to use?
 - install packages
 - tested under Windows 10
-- Copy your sequence of images to data\OtherVid\RenderLR\SomeFolder\
+- Copy your sequence of images to data\SomeTest\SomeTestLR\SomeFolder\
 - run test.bat
-- get results at results\OtherVid\EGVSR_iter420000\SomeFolder\
+- get results at results\SomeTest\EGVSR_iter420000\SomeFolder\
 - change something in experiments_BD\EGVSR\001\test.yml
     -  max_vertical_res output max vertical resolution
     -  cache_length once read this number of images into memory
