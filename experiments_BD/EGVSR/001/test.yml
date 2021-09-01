@@ -8,31 +8,16 @@ verbose: false
 dataset:
   degradation:
     type: BD
-    sigma: 1.5
+    sigma: 0.0
 
   test1:
-    name: Vid4
-    gt_seq_dir: data/Vid4/GT
-    lr_seq_dir: data/Vid4/Gaussian4xLR
+    name: SomeTest
+    lr_seq_dir: data/SomeTest/SomeTestLR
     filter_file: ~
-    num_workers: 4
+    num_workers: 1 #DataLoader
     pin_memory: true
+    max_vertical_res: 2160
 
-  test2:
-    name: ToS3
-    gt_seq_dir: data/ToS3/GT
-    lr_seq_dir: data/ToS3/Gaussian4xLR
-    filter_file: ~
-    num_workers: 4
-    pin_memory: true
-
-  test3:
-    name: Gvt72
-    gt_seq_dir: data/Gvt72/GT
-    lr_seq_dir: data/Gvt72/Gaussian4xLR
-    filter_file: ~
-    num_workers: 4
-    pin_memory: true
 
 # model configs
 model:
@@ -52,24 +37,9 @@ test:
   # whether to save the SR results
   save_res: true
   res_dir: results
+  num_save_threads: 2
 
   # temporal padding
   padding_mode: reflect
   num_pad_front: 5
-
-# metric configs
-metric:
-  PSNR:
-    colorspace: y
-    mult: 1.0
-
-  LPIPS:
-    model: net-lin
-    net: alex
-    colorspace: rgb
-    spatial: false
-    version: 0.1
-    mult: 1.0
-
-  tOF:
-    mult: 1.0
+  cache_length: 35

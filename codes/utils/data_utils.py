@@ -1,3 +1,4 @@
+from PIL import Image
 import os
 import os.path as osp
 
@@ -84,6 +85,18 @@ def float32_to_uint8(inputs):
     return np.uint8(np.clip(np.round(inputs * 255), 0, 255))
 
 
+def float32_to_uint8_t(inputs):
+    """ Convert t.float32 array to t.uint8
+
+        Parameters:
+            :param input: t.float32, (NT)CHW, [0, 1]
+            :return: t.uint8, (NT)CHW, [0, 255]
+    """
+    # print(inputs.size())
+    return torch.clip(torch.round(inputs[..., [2, 1, 0]] * 255), 0, 255).to(torch.uint8)
+    # return torch.clip(torch.round(inputs[...,[2,1,0]] * 255), 0, 255).to(torch.uint8)
+
+
 def canonicalize(data):
     """ Convert data to torch tensor with type float32
 
@@ -106,7 +119,7 @@ def canonicalize(data):
     return data
 
 
-def save_sequence(seq_dir, seq_data, frm_idx_lst=None, to_bgr=False):
+def save_sequence(seq_dir, seq_data, v_max, frm_idx_lst=None):
     """ Save each frame of a sequence to .png image in seq_dir
 
         Parameters:
@@ -116,9 +129,6 @@ def save_sequence(seq_dir, seq_data, frm_idx_lst=None, to_bgr=False):
             :param to_bgr: whether to flip color channels
     """
 
-    if to_bgr:
-        seq_data = seq_data[..., ::-1]  # rgb2bgr
-
     # use default frm_idx_lst is not specified
     tot_frm = len(seq_data)
     if frm_idx_lst is None:
@@ -127,5 +137,14 @@ def save_sequence(seq_dir, seq_data, frm_idx_lst=None, to_bgr=False):
     # save for each frame
     os.makedirs(seq_dir, exist_ok=True)
     for i in range(tot_frm):
-        cv2.imwrite(osp.join(seq_dir, frm_idx_lst[i]), seq_data[i])
-
+        img_frame = seq_data[i].numpy()
+        if v_max >= img_frame.shape[0]:
+            cv2.imwrite(osp.join(seq_dir, frm_idx_lst[i]), img_frame)
+        else:
+            height = max(int(v_max), 1)
+            width = max(
+                int(img_frame.shape[1] * (float(height) / img_frame.shape[0])), 1)
+            # dsize
+            dsize = (width, height)
+            cv2.imwrite(osp.join(seq_dir, frm_idx_lst[i]), cv2.resize(
+                img_frame, dsize, interpolation=cv2.INTER_LANCZOS4))

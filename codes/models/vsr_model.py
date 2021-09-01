@@ -125,7 +125,7 @@ class VSRModel(BaseModel):
                 :param lr_data: a rgb video sequence with shape thwc
                 :return: a rgb video sequence with type np.uint8 and shape thwc
         """
-        print(lr_data.size())
+        # print(lr_data.size())
 
         # canonicalize
         lr_data = data_utils.canonicalize(lr_data)  # to torch.FloatTensor

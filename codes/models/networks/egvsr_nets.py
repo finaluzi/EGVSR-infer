@@ -5,7 +5,7 @@ import torch.nn.functional as F
 
 from models.networks.base_nets import BaseSequenceGenerator, BaseSequenceDiscriminator
 from utils.net_utils import space_to_depth, backward_warp, get_upsampling_func
-from utils.data_utils import float32_to_uint8
+from utils.data_utils import float32_to_uint8_t
 
 
 # -------------------- generator modules -------------------- #
@@ -270,25 +270,36 @@ class FRNet(BaseSequenceGenerator):
         s = self.scale
 
         # forward
-        hr_seq = []
+        hr_frames = []
+        # hr_seq = []
         lr_prev = torch.zeros(1, c, h, w, dtype=torch.float32).to(device)
         hr_prev = torch.zeros(
             1, c, s * h, s * w, dtype=torch.float32).to(device)
 
+        self.eval()
         for i in range(tot_frm):
             with torch.no_grad():
-                self.eval()
-
+                print('[M] forward:', i+1, '/', tot_frm, end='\r')
                 lr_curr = lr_data[i: i + 1, ...].to(device)
                 hr_curr = self.forward(lr_curr, lr_prev, hr_prev)
                 lr_prev, hr_prev = lr_curr, hr_curr
+                # hr_frm
+                hr_fu = float32_to_uint8_t(hr_curr[0].permute(1, 2, 0))
+                hr_frames.append(hr_fu.to('cpu'))
+                # print(hr_curr)
+                # hr_frm = hr_curr.squeeze(0).cpu().numpy()  # chw|rgb|uint8
 
-                hr_frm = hr_curr.squeeze(0).cpu().numpy()  # chw|rgb|uint8
-
-            hr_seq.append(float32_to_uint8(hr_frm))
-
-        return np.stack(hr_seq).transpose(0, 2, 3, 1)  # thwc
-
+            # hr_seq.append(float32_to_uint8(hr_frm))
+        # for hrf in hr_frames:
+            # print(hrf)
+            # hr_frm = hrf.squeeze(0).cpu().numpy()  # chw|rgb|uint8
+            # print(hr_frm)
+            # hr_seq.append(float32_to_uint8(hr_frm))
+            # print(hr_seq[-1])
+            # print(hrf)
+# np your ass
+        # print(torch.stack(hr_frames).permute(0, 2, 3, 1).size())
+        return torch.stack(hr_frames)  # thwc
 
 
 # ------------------ discriminator modules ------------------ #
@@ -312,7 +323,8 @@ class DiscriminatorBlocks(nn.Module):
             nn.LeakyReLU(0.2, inplace=True))
 
         self.block4 = nn.Sequential(  # /16
-            nn.Conv2d(128, 256, kernel_size=4, stride=2, padding=1, bias=False),
+            nn.Conv2d(128, 256, kernel_size=4,
+                      stride=2, padding=1, bias=False),
             nn.BatchNorm2d(256, affine=True),
             nn.LeakyReLU(0.2, inplace=True))
 
@@ -349,7 +361,8 @@ class SpatioTemporalDiscriminator(BaseSequenceDiscriminator):
         self.discriminator_block = DiscriminatorBlocks()  # downsample 16x
 
         # classifier
-        self.dense = nn.Linear(256 * spatial_size // 16 * spatial_size // 16, 1)
+        self.dense = nn.Linear(256 * spatial_size //
+                               16 * spatial_size // 16, 1)
 
     def forward(self, x):
         out = self.conv_in(x)
@@ -382,7 +395,6 @@ class SpatioTemporalDiscriminator(BaseSequenceDiscriminator):
         c_size = int(s_size * args_dict['crop_border_ratio'])
         n_pad = (s_size - c_size) // 2
 
-
         # ------------ compute forward & backward flow ------------ #
         if 'hr_flow_merge' not in args_dict:
             if args_dict['use_pp_crit']:
@@ -402,19 +414,20 @@ class SpatioTemporalDiscriminator(BaseSequenceDiscriminator):
 
                 hr_flow_bw = hr_flow[:, 0:t:3, ...]  # e.g., frame1 -> frame0
                 hr_flow_idle = torch.zeros_like(hr_flow_bw)  # frame1 -> frame1
-                hr_flow_fw = hr_flow_fw.view(n, t // 3, 2, hr_h, hr_w)  # frame1 -> frame2
+                hr_flow_fw = hr_flow_fw.view(
+                    n, t // 3, 2, hr_h, hr_w)  # frame1 -> frame2
 
             # merge bw/idle/fw flows
             hr_flow_merge = torch.stack(
                 [hr_flow_bw, hr_flow_idle, hr_flow_fw], dim=2)  # n,t//3,3,2,h,w
 
             # reshape and stop gradient propagation
-            hr_flow_merge = hr_flow_merge.view(n_clip * 3, 2, hr_h, hr_w).detach()
+            hr_flow_merge = hr_flow_merge.view(
+                n_clip * 3, 2, hr_h, hr_w).detach()
 
         else:
             # reused data to reduce computations
             hr_flow_merge = args_dict['hr_flow_merge']
-
 
         # ------------ build up inputs for D (3 parts) ------------ #
         # part 1: bicubic upsampled data (conditional inputs)
@@ -443,10 +456,8 @@ class SpatioTemporalDiscriminator(BaseSequenceDiscriminator):
         # combine 3 parts together
         input_data = torch.cat([orig_data, warp_data, cond_data], dim=1)
 
-
         # ------------ classify ------------ #
         pred = self.forward(input_data)  # out, feature_list
-
 
         # construct output dict (return other data beside pred)
         ret_dict = {
@@ -477,7 +488,8 @@ class SpatialDiscriminator(BaseSequenceDiscriminator):
         self.discriminator_block = DiscriminatorBlocks()  # /16
 
         # classifier
-        self.dense = nn.Linear(256 * spatial_size // 16 * spatial_size // 16, 1)
+        self.dense = nn.Linear(256 * spatial_size //
+                               16 * spatial_size // 16, 1)
 
     def forward(self, x):
         out = self.conv_in(x)
@@ -493,7 +505,6 @@ class SpatialDiscriminator(BaseSequenceDiscriminator):
         n, t, c, hr_h, hr_w = data.size()
         data = data.view(n * t, c, hr_h, hr_w)
 
-
         # ------------ build up inputs for D ------------ #
         if self.use_cond:
             bi_data = args_dict['bi_data'].view(n * t, c, hr_h, hr_w)
@@ -501,10 +512,8 @@ class SpatialDiscriminator(BaseSequenceDiscriminator):
         else:
             input_data = data
 
-
         # ------------ classify ------------ #
         pred = self.forward(input_data)
-
 
         # construct output dict (nothing to return)
         ret_dict = {}

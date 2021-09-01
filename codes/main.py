@@ -1,149 +1,68 @@
 import os
 import os.path as osp
-import math
 import argparse
 import yaml
 import time
-
 import torch
-
-from data import create_dataloader, prepare_data
+from data import create_data_set, create_dataloader_from_set
 from models import define_model
-from models.networks import define_generator
-from metrics.metric_calculator import MetricCalculator
-from metrics.model_summary import register, profile_model
 from utils import base_utils, data_utils
+import threading
+import time
+from queue import Queue
+import warnings
+warnings.filterwarnings("ignore")
 
 
-def train(opt):
-    # logging
-    logger = base_utils.get_logger('base')
-    logger.info('{} Options {}'.format('='*20, '='*20))
-    base_utils.print_options(opt, logger)
+class SaveThread(threading.Thread):
+    def __init__(self, queue):
+        threading.Thread.__init__(self, args=(), kwargs=None)
+        self.queue = queue
+        self.hr_dict = {}
+        self.working = False
+        # self.isDaemon = True
 
-    # create data loader
-    train_loader = create_dataloader(opt, dataset_idx='train')
+    def run(self):
+        while True:
+            if not self.queue.empty():
+                val = self.queue.get()
+                if type(val) is str:
+                    print('[W] Worker End', self.getName())
+                    break
+                else:
+                    print('[W] Start Worker output images', self.getName())
+                    self.working = True
+                    self.hr_dict = val
+                    self.save_images()
+                    self.hr_dict = {}
+                    self.working = False
+                    print('[W] End Worker output images', self.getName())
+            time.sleep(0.06)
 
-    # create downsampling kernels for BD degradation
-    kernel = data_utils.create_kernel(opt)
-
-    # create model
-    model = define_model(opt)
-
-    # training configs
-    total_sample = len(train_loader.dataset)
-    iter_per_epoch = len(train_loader)
-    total_iter = opt['train']['total_iter']
-    total_epoch = int(math.ceil(total_iter / iter_per_epoch))
-    start_iter, iter = opt['train']['start_iter'], 0
-
-    test_freq = opt['test']['test_freq']
-    log_freq = opt['logger']['log_freq']
-    ckpt_freq = opt['logger']['ckpt_freq']
-
-    logger.info('Number of training samples: {}'.format(total_sample))
-    logger.info('Total epochs needed: {} for {} iterations'.format(
-        total_epoch, total_iter))
-
-    # train
-    for epoch in range(total_epoch):
-        for data in train_loader:
-            # update iter
-            iter += 1
-            curr_iter = start_iter + iter
-            if iter > total_iter:
-                logger.info('Finish training')
-                break
-
-            # update learning rate
-            model.update_learning_rate()
-
-            # prepare data
-            data = prepare_data(opt, data, kernel)
-
-            # train for a mini-batch
-            model.train(data)
-
-            # update running log
-            model.update_running_log()
-
-            # log
-            if log_freq > 0 and iter % log_freq == 0:
-                # basic info
-                msg = '[epoch: {} | iter: {}'.format(epoch, curr_iter)
-                for lr_type, lr in model.get_current_learning_rate().items():
-                    msg += ' | {}: {:.2e}'.format(lr_type, lr)
-                msg += '] '
-
-                # loss info
-                log_dict = model.get_running_log()
-                msg += ', '.join([
-                    '{}: {:.3e}'.format(k, v) for k, v in log_dict.items()])
-
-                logger.info(msg)
-
-            # save model
-            if ckpt_freq > 0 and iter % ckpt_freq == 0:
-                model.save(curr_iter)
-
-            # evaluate performance
-            if test_freq > 0 and iter % test_freq == 0:
-                # setup model index
-                model_idx = 'G_iter{}'.format(curr_iter)
-
-                # for each testset
-                for dataset_idx in sorted(opt['dataset'].keys()):
-                    # use dataset with prefix `test`
-                    if not dataset_idx.startswith('test'):
-                        continue
-
-                    ds_name = opt['dataset'][dataset_idx]['name']
-                    logger.info(
-                        'Testing on {}: {}'.format(dataset_idx, ds_name))
-
-                    # create data loader
-                    test_loader = create_dataloader(opt, dataset_idx=dataset_idx)
-
-                    # define metric calculator
-                    metric_calculator = MetricCalculator(opt)
-
-                    # infer and compute metrics for each sequence
-                    for data in test_loader:
-                        # fetch data
-                        lr_data = data['lr'][0]
-                        seq_idx = data['seq_idx'][0]
-                        frm_idx = [frm_idx[0] for frm_idx in data['frm_idx']]
-
-                        # infer
-                        hr_seq = model.infer(lr_data)  # thwc|rgb|uint8
-
-                        # save results (optional)
-                        if opt['test']['save_res']:
-                            res_dir = osp.join(
-                                opt['test']['res_dir'], ds_name, model_idx)
-                            res_seq_dir = osp.join(res_dir, seq_idx)
-                            data_utils.save_sequence(
-                                res_seq_dir, hr_seq, frm_idx, to_bgr=True)
-
-                        # compute metrics for the current sequence
-                        true_seq_dir = osp.join(
-                            opt['dataset'][dataset_idx]['gt_seq_dir'], seq_idx)
-                        metric_calculator.compute_sequence_metrics(
-                            seq_idx, true_seq_dir, '', pred_seq=hr_seq)
-
-                    # save/print metrics
-                    if opt['test'].get('save_json'):
-                        # save results to json file
-                        json_path = osp.join(
-                            opt['test']['json_dir'], '{}_avg.json'.format(ds_name))
-                        metric_calculator.save_results(model_idx, json_path, override=True)
-                    else:
-                        # print directly
-                        metric_calculator.display_results()
+    def save_images(self):
+        opt = self.hr_dict['opt']
+        model_idx = self.hr_dict['model_idx']
+        ds_name = self.hr_dict['ds_name']
+        seq_idx = self.hr_dict['seq_idx']
+        frm_idx = self.hr_dict['frm_idx']
+        hr_seqs = self.hr_dict['hr_seqs']
+        v_max = self.hr_dict['v_max']
+        if opt['test']['save_res']:
+            res_dir = osp.join(
+                opt['test']['res_dir'], ds_name, model_idx)
+            res_seq_dir = osp.join(res_dir, seq_idx)
+            data_utils.save_sequence(
+                res_seq_dir, hr_seqs, v_max, frm_idx)
 
 
 def test(opt):
     # logging
+    threads = []
+    for _ in range(0, opt['test']['num_save_threads']):
+        thread = SaveThread(Queue())
+        thread.start()
+        threads.append(thread)
+
     logger = base_utils.get_logger('base')
     if opt['verbose']:
         logger.info('{} Configurations {}'.format('=' * 20, '=' * 20))
@@ -153,7 +72,7 @@ def test(opt):
     for load_path in opt['model']['generator']['load_path_lst']:
         # setup model index
         model_idx = osp.splitext(osp.split(load_path)[-1])[0]
-        
+
         # log
         logger.info('=' * 40)
         logger.info('Testing model: {}'.format(model_idx))
@@ -162,7 +81,7 @@ def test(opt):
         # create model
         opt['model']['generator']['load_path'] = load_path
         model = define_model(opt)
-
+        pad_num = opt['test']['num_pad_front']
         # for each test dataset
         for dataset_idx in sorted(opt['dataset'].keys()):
             # use dataset with prefix `test`
@@ -171,105 +90,54 @@ def test(opt):
 
             ds_name = opt['dataset'][dataset_idx]['name']
             logger.info('Testing on {}: {}'.format(dataset_idx, ds_name))
-
-            # define metric calculator
-            try:
-                metric_calculator = MetricCalculator(opt)
-            except:
-                print('No metirc need to compute!')
+            v_max = opt['dataset'][dataset_idx]['max_vertical_res']
 
             # create data loader
-            test_loader = create_dataloader(opt, dataset_idx=dataset_idx)
+            test_set = create_data_set(opt, dataset_idx=dataset_idx)
 
-            # infer and store results for each sequence
-            for i, data in enumerate(test_loader):
+            while not test_set.is_end():
+                test_loader = create_dataloader_from_set(
+                    opt, test_set, dataset_idx=dataset_idx)
 
-                # fetch data
-                lr_data = data['lr'][0]
-                seq_idx = data['seq_idx'][0]
-                frm_idx = [frm_idx[0] for frm_idx in data['frm_idx']]
+                # infer and store results for each sequence
+                for _, data in enumerate(test_loader):
+                    # fetch data
+                    lr_data = data['lr'][0]
+                    tot_frm, _, _, _ = lr_data.size()
+                    if tot_frm-pad_num > pad_num:
+                        seq_idx = data['seq_idx'][0]
+                        frm_idx = [frm_idx[0] for frm_idx in data['frm_idx']]
 
-                # infer
-                hr_seq = model.infer(lr_data)  # thwc|rgb|uint8
+                        # print(lr_data, seq_idx, frm_idx)
+                        # infer
+                        # print('infer start')
+                        hr_seq = model.infer(lr_data)  # thwc|rgb|uint8
+                        # print('infer over')
 
-                # save results (optional)
-                if opt['test']['save_res']:
-                    res_dir = osp.join(opt['test']['res_dir'], ds_name, model_idx)
-                    res_seq_dir = osp.join(res_dir, seq_idx)
-                    data_utils.save_sequence(res_seq_dir, hr_seq, frm_idx, to_bgr=True)
+                        save_dict = {'opt': opt, 'model_idx': model_idx, 'ds_name': ds_name,
+                                     'seq_idx': seq_idx, 'frm_idx': frm_idx, 'hr_seqs': hr_seq, 'v_max': v_max}
+                        # save results (optional)
+                        has_free_worker = False
+                        while not has_free_worker:
+                            for t in threads:
+                                if not t.working:
+                                    t.queue.put(save_dict)
+                                    has_free_worker = True
+                                    break
+                            time.sleep(0.03)
+                    else:
+                        print('[B] Skip batch', test_set.batch_num)
 
-                # compute metrics for the current sequence
-                true_seq_dir = osp.join(opt['dataset'][dataset_idx]['gt_seq_dir'], seq_idx)
-                try:
-                    metric_calculator.compute_sequence_metrics(seq_idx, true_seq_dir, '', pred_seq=hr_seq)
-                except:
-                    print('No metirc need to compute!')
-
-            # save/print metrics
-            try:
-                if opt['test'].get('save_json'):
-                    # save results to json file
-                    json_path = osp.join(
-                        opt['test']['json_dir'], '{}_avg.json'.format(ds_name))
-                    metric_calculator.save_results(model_idx, json_path, override=True)
-                else:
-                    # print directly
-                    metric_calculator.display_results()
-
-            except:
-                print('No metirc need to save!')
-
-            logger.info('-' * 40)
+                logger.info('-' * 40)
+                test_set.batch_num += 1
 
     # logging
+    print('[W] Waiting for Workers...')
+    for t in threads:
+        t.queue.put('end')
+        t.join()
     logger.info('Finish testing')
     logger.info('=' * 40)
-
-
-def profile(opt, lr_size, test_speed=False):
-    # logging
-    logger = base_utils.get_logger('base')
-    logger.info('{} Model Information {}'.format('='*20, '='*20))
-    base_utils.print_options(opt['model']['generator'], logger)
-
-    # basic configs
-    scale = opt['scale']
-    device = torch.device(opt['device'])
-
-    # create model
-    net_G = define_generator(opt).to(device)
-
-    # get dummy input
-    dummy_input_dict = net_G.generate_dummy_input(lr_size)
-    for key in dummy_input_dict.keys():
-        dummy_input_dict[key] = dummy_input_dict[key].to(device)
-
-    # profile
-    register(net_G, dummy_input_dict)
-    gflops, params = profile_model(net_G)
-
-    logger.info('-' * 40)
-    logger.info('Super-resolute data from {}x{}x{} to {}x{}x{}'.format(
-        *lr_size, lr_size[0], lr_size[1]*scale, lr_size[2]*scale))
-    logger.info('Parameters (x10^6): {:.3f}'.format(params/1e6))
-    logger.info('FLOPs (x10^9): {:.3f}'.format(gflops))
-    logger.info('-' * 40)
-
-    # test running speed
-    if test_speed:
-        n_test = 30
-        tot_time = 0
-
-        for i in range(n_test):
-            start_time = time.time()
-            with torch.no_grad():
-                _ = net_G(**dummy_input_dict)
-            end_time = time.time()
-            tot_time += end_time - start_time
-
-        logger.info('Speed (FPS): {:.3f} (averaged for {} runs)'.format(
-            n_test / tot_time, n_test))
-        logger.info('-' * 40)
 
 
 if __name__ == '__main__':
@@ -277,26 +145,16 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--exp_dir', type=str, required=True,
                         help='directory of the current experiment')
-    parser.add_argument('--mode', type=str, required=True,
-                        help='which mode to use (train|test|profile)')
-    parser.add_argument('--model', type=str, required=True,
-                        help='which model to use (FRVSR|TecoGAN)')
     parser.add_argument('--opt', type=str, required=True,
                         help='path to the option yaml file')
     parser.add_argument('--gpu_id', type=int, default=-1,
                         help='GPU index, -1 for CPU')
-    parser.add_argument('--lr_size', type=str, default='3x256x256',
-                        help='size of the input frame')
-    parser.add_argument('--test_speed', action='store_true',
-                        help='whether to test the actual running speed')
     args = parser.parse_args()
-
 
     # ----------------- get options ----------------- #
     print(args.exp_dir)
     with open(osp.join(args.exp_dir, args.opt), 'r') as f:
         opt = yaml.load(f.read(), Loader=yaml.FullLoader)
-
 
     # ----------------- general configs ----------------- #
     # experiment dir
@@ -321,32 +179,10 @@ if __name__ == '__main__':
     else:
         opt['device'] = 'cpu'
 
-
-    # ----------------- train ----------------- #
-    if args.mode == 'train':
-        # setup paths
-        base_utils.setup_paths(opt, mode='train')
-
-        # run
-        opt['is_train'] = True
-        train(opt)
-
     # ----------------- test ----------------- #
-    elif args.mode == 'test':
-        # setup paths
-        base_utils.setup_paths(opt, mode='test')
+# setup paths
+    base_utils.setup_paths(opt, mode='test')
 
-        # run
-        opt['is_train'] = False
-        test(opt)
-
-    # ----------------- profile ----------------- #
-    elif args.mode == 'profile':
-        lr_size = tuple(map(int, args.lr_size.split('x')))
-
-        # run
-        profile(opt, lr_size, args.test_speed)
-
-    else:
-        raise ValueError(
-            'Unrecognized mode: {} (train|test|profile)'.format(args.mode))
+    # run
+    opt['is_train'] = False
+    test(opt)

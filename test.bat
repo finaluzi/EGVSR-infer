@@ -1,0 +1,1 @@
+python ./codes/main.py --exp_dir ./experiments_BD/EGVSR/001 --opt test.yml --gpu_id 0
