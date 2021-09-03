@@ -1,3 +1,4 @@
+import time
 import functools
 
 import torch
@@ -36,7 +37,6 @@ def initialize_weights(net_l, init_type='kaiming', scale=1):
 def space_to_depth(x, scale=4):
     """ Equivalent to tf.space_to_depth()
     """
-
     n, c, in_h, in_w = x.size()
     out_h, out_w = in_h // scale, in_w // scale
 
@@ -55,22 +55,34 @@ def backward_warp(x, flow, mode='bilinear', padding_mode='border'):
         Reference:
             https://github.com/sniklaus/pytorch-spynet/blob/master/run.py#L41
     """
-
     n, c, h, w = x.size()
-
     # create mesh grid
     iu = torch.linspace(-1.0, 1.0, w).view(1, 1, 1, w).expand(n, -1, h, -1)
     iv = torch.linspace(-1.0, 1.0, h).view(1, 1, h, 1).expand(n, -1, -1, w)
     grid = torch.cat([iu, iv], 1).to(flow.device)
+    return backward_warp_cache(x, flow, grid, mode, padding_mode)
+
+
+def backward_warp_cache(x, flow, grid, mode='bilinear', padding_mode='border'):
+    """ Backward warp `x` according to `flow`
+
+        Both x and flow are pytorch tensor in shape `nchw` and `n2hw`
+
+        Reference:
+            https://github.com/sniklaus/pytorch-spynet/blob/master/run.py#L41
+    """
+
+    n, c, h, w = x.size()
 
     # normalize flow to [-1, 1]
     flow = torch.cat([
         flow[:, 0:1, ...] / ((w - 1.0) / 2.0),
         flow[:, 1:2, ...] / ((h - 1.0) / 2.0)], dim=1)
-
+    grid = grid.detach().clone()
     # add flow to grid and reshape to nhw2
     grid = (grid + flow).permute(0, 2, 3, 1)
 
+    # start = time.perf_counter()
     # bilinear sampling
     # Note: `align_corners` is set to `True` by default in PyTorch version
     #        lower than 1.4.0
@@ -79,6 +91,7 @@ def backward_warp(x, flow, mode='bilinear', padding_mode='border'):
             x, grid, mode=mode, padding_mode=padding_mode, align_corners=True)
     else:
         output = F.grid_sample(x, grid, mode=mode, padding_mode=padding_mode)
+    # print(f"bilinear sampling in {time.perf_counter() - start} s")
 
     return output
 
@@ -153,4 +166,3 @@ class BicubicUpsample(nn.Module):
             n, c, s, h * s, -1).permute(0, 1, 3, 4, 2).reshape(n, c, h * s, -1)
 
         return output
-

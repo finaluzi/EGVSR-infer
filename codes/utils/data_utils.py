@@ -97,6 +97,18 @@ def float32_to_uint8_t(inputs):
     # return torch.clip(torch.round(inputs[...,[2,1,0]] * 255), 0, 255).to(torch.uint8)
 
 
+def float32_change_rgb(inputs):
+    """ Convert t.float32 array to t.uint8
+
+        Parameters:
+            :param input: t.float32, (NT)CHW, [0, 1]
+            :return: t.uint8, (NT)CHW, [0, 255]
+    """
+    # print(inputs.size())
+    return inputs[..., [2, 1, 0]]
+    # return torch.clip(torch.round(inputs[...,[2,1,0]] * 255), 0, 255).to(torch.uint8)
+
+
 def canonicalize(data):
     """ Convert data to torch tensor with type float32
 
@@ -138,6 +150,10 @@ def save_sequence(seq_dir, seq_data, v_max, frm_idx_lst=None):
     os.makedirs(seq_dir, exist_ok=True)
     for i in range(tot_frm):
         img_frame = seq_data[i].numpy()
+        # Apply bilateral filter with d = 15, 
+        # sigmaColor = sigmaSpace = 75.
+        # img_frame = cv2.bilateralFilter(img_frame, 15, 75, 75)
+  
         if v_max >= img_frame.shape[0]:
             cv2.imwrite(osp.join(seq_dir, frm_idx_lst[i]), img_frame)
         else:
@@ -147,4 +163,6 @@ def save_sequence(seq_dir, seq_data, v_max, frm_idx_lst=None):
             # dsize
             dsize = (width, height)
             cv2.imwrite(osp.join(seq_dir, frm_idx_lst[i]), cv2.resize(
-                img_frame, dsize, interpolation=cv2.INTER_LANCZOS4))
+                img_frame, dsize, interpolation=cv2.INTER_CUBIC))
+            #  [int(cv2.IMWRITE_PNG_COMPRESSION), 1]
+        # cv2.imwrite()

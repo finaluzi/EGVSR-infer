@@ -1,6 +1,7 @@
 import os
 import os.path as osp
 import argparse
+from torch.nn.functional import selu
 import yaml
 import time
 import torch
@@ -30,23 +31,28 @@ class SaveThread(threading.Thread):
                     print('[W] Worker End', self.getName())
                     break
                 else:
-                    print('[W] Start Worker output images', self.getName())
+                    print('[W] Start Worker output images', self.getName(), end='\r')
                     self.working = True
                     self.hr_dict = val
+                    # start = time.perf_counter()
                     self.save_images()
+                    # print(
+                        # f"save_images Completed Execution in {time.perf_counter() - start} seconds")
                     self.hr_dict = {}
                     self.working = False
-                    print('[W] End Worker output images', self.getName())
+                    print('[W] End Worker output images', self.getName(), end='\r')
             time.sleep(0.06)
 
     def save_images(self):
-        opt = self.hr_dict['opt']
-        model_idx = self.hr_dict['model_idx']
-        ds_name = self.hr_dict['ds_name']
-        seq_idx = self.hr_dict['seq_idx']
-        frm_idx = self.hr_dict['frm_idx']
         hr_seqs = self.hr_dict['hr_seqs']
-        v_max = self.hr_dict['v_max']
+        start_idx = self.hr_dict['start_idx']
+        opt_dict = self.hr_dict['opt']
+        opt = opt_dict['opt']
+        model_idx = opt_dict['model_idx']
+        ds_name = opt_dict['ds_name']
+        seq_idx = opt_dict['seq_idx']
+        frm_idx = opt_dict['frm_idx'][start_idx:]
+        v_max = opt_dict['v_max']
         if opt['test']['save_res']:
             res_dir = osp.join(
                 opt['test']['res_dir'], ds_name, model_idx)
@@ -55,13 +61,44 @@ class SaveThread(threading.Thread):
                 res_seq_dir, hr_seqs, v_max, frm_idx)
 
 
+class SaveThreadsMgr():
+    def __init__(self):
+        self.threads = []
+        self.save_opt_cache = {}
+
+    def add_thread_start(self):
+        t = SaveThread(Queue())
+        t.start()
+        self.threads.append(t)
+        return len(self.threads)
+
+    def save_img_worker_block(self, save_dict):
+        # save_dict hr_seqs, start_idx
+        has_free_worker = False
+        count = 0
+        while not has_free_worker:
+            print('[W] Finding free worker...', count, end='\r')
+            for t in self.threads:
+                if not t.working:
+                    save_dict['opt'] = self.save_opt_cache
+                    t.queue.put(save_dict)
+                    has_free_worker = True
+                    break
+            count += 1
+            time.sleep(0.1)
+
+    def join_all(self):
+        print('[W] Waiting for Workers...')
+        for t in self.threads:
+            t.queue.put('end')
+            t.join()
+
+
 def test(opt):
     # logging
-    threads = []
+    threads = SaveThreadsMgr()
     for _ in range(0, opt['test']['num_save_threads']):
-        thread = SaveThread(Queue())
-        thread.start()
-        threads.append(thread)
+        threads.add_thread_start()
 
     logger = base_utils.get_logger('base')
     if opt['verbose']:
@@ -81,6 +118,8 @@ def test(opt):
         # create model
         opt['model']['generator']['load_path'] = load_path
         model = define_model(opt)
+        # bind save threads
+        model.bind_save_threads(threads, opt['test']['save_images_num'])
         pad_num = opt['test']['num_pad_front']
         # for each test dataset
         for dataset_idx in sorted(opt['dataset'].keys()):
@@ -93,6 +132,7 @@ def test(opt):
             v_max = opt['dataset'][dataset_idx]['max_vertical_res']
 
             # create data loader
+
             test_set = create_data_set(opt, dataset_idx=dataset_idx)
 
             while not test_set.is_end():
@@ -100,6 +140,7 @@ def test(opt):
                     opt, test_set, dataset_idx=dataset_idx)
 
                 # infer and store results for each sequence
+                # enumerate=5s
                 for _, data in enumerate(test_loader):
                     # fetch data
                     lr_data = data['lr'][0]
@@ -108,23 +149,11 @@ def test(opt):
                         seq_idx = data['seq_idx'][0]
                         frm_idx = [frm_idx[0] for frm_idx in data['frm_idx']]
 
-                        # print(lr_data, seq_idx, frm_idx)
-                        # infer
-                        # print('infer start')
-                        hr_seq = model.infer(lr_data)  # thwc|rgb|uint8
-                        # print('infer over')
+                        threads.save_opt_cache = {'opt': opt, 'model_idx': model_idx, 'ds_name': ds_name,
+                                                  'seq_idx': seq_idx, 'frm_idx': frm_idx, 'v_max': v_max}
+                        model.infer(lr_data)  # thwc|rgb|uint8
 
-                        save_dict = {'opt': opt, 'model_idx': model_idx, 'ds_name': ds_name,
-                                     'seq_idx': seq_idx, 'frm_idx': frm_idx, 'hr_seqs': hr_seq, 'v_max': v_max}
-                        # save results (optional)
-                        has_free_worker = False
-                        while not has_free_worker:
-                            for t in threads:
-                                if not t.working:
-                                    t.queue.put(save_dict)
-                                    has_free_worker = True
-                                    break
-                            time.sleep(0.03)
+                        # threads.save_img_worker_block(save_dict)
                     else:
                         print('[B] Skip batch', test_set.batch_num)
 
@@ -132,10 +161,7 @@ def test(opt):
                 test_set.batch_num += 1
 
     # logging
-    print('[W] Waiting for Workers...')
-    for t in threads:
-        t.queue.put('end')
-        t.join()
+    threads.join_all()
     logger.info('Finish testing')
     logger.info('=' * 40)
 

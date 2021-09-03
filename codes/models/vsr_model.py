@@ -1,6 +1,7 @@
 from collections import OrderedDict
 
-import torch
+import time
+from torch.nn.functional import selu
 import torch.optim as optim
 
 from .base_model import BaseModel
@@ -29,6 +30,9 @@ class VSRModel(BaseModel):
         # configs for training
         if self.is_train:
             self.config_training()
+        self._save_num = 0
+        self._n_pad_f = 0
+        self._has_pad = False
 
     def set_network(self):
         # define net G
@@ -80,16 +84,13 @@ class VSRModel(BaseModel):
         # ------------ prepare data ------------ #
         lr_data, gt_data = data['lr'], data['gt']
 
-
         # ------------ clear optim ------------ #
         self.net_G.train()
         self.optim_G.zero_grad()
 
-
         # ------------ forward G ------------ #
         net_G_output_dict = self.net_G.forward_sequence(lr_data)
         hr_data = net_G_output_dict['hr_data']
-
 
         # ------------ optimize G ------------ #
         loss_G = 0
@@ -128,17 +129,37 @@ class VSRModel(BaseModel):
         # print(lr_data.size())
 
         # canonicalize
-        lr_data = data_utils.canonicalize(lr_data)  # to torch.FloatTensor
+
+        # lr_data = data_utils.canonicalize(lr_data)  # to torch.FloatTensor
         lr_data = lr_data.permute(0, 3, 1, 2)  # tchw
 
         # temporal padding
-        lr_data, n_pad_front = self.pad_sequence(lr_data)
+        lr_data, self._n_pad_f = self.pad_sequence(lr_data)
+        self._has_pad = False
+
+        self.net_G.bind_model(self)
 
         # infer
-        hr_seq = self.net_G.infer_sequence(lr_data, self.device)
-        hr_seq = hr_seq[n_pad_front:, ...]
+        self.net_G.infer_sequence(lr_data, self.device)
 
-        return hr_seq
+        # return hr_seq
 
     def save(self, current_iter):
         self.save_network(self.net_G, 'G', current_iter)
+
+    def save_hr_images(self, hr_seq, start_idx):
+        if self._n_pad_f > 0:
+            if self._has_pad:
+                start_idx -= self._n_pad_f
+            else:
+                hr_seq = hr_seq[self._n_pad_f:]
+                self._has_pad = True
+        self.save_threads.save_img_worker_block(
+            {'hr_seqs': hr_seq, 'start_idx': max(0, start_idx)})
+
+    def bind_save_threads(self, threads, save_num):
+        self.save_threads = threads
+        self._save_num = save_num
+
+    def get_save_num(self):
+        return self._save_num

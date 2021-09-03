@@ -1,11 +1,14 @@
+from models.vsr_model import VSRModel
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from models.networks.base_nets import BaseSequenceGenerator, BaseSequenceDiscriminator
-from utils.net_utils import space_to_depth, backward_warp, get_upsampling_func
+from utils.net_utils import backward_warp_cache, space_to_depth, backward_warp, get_upsampling_func
 from utils.data_utils import float32_to_uint8_t
+
+import time
 
 
 # -------------------- generator modules -------------------- #
@@ -133,13 +136,11 @@ class SRNet(nn.Module):
         """ lr_curr: the current lr data in shape nchw
             hr_prev_tran: the previous transformed hr_data in shape n(4*4*c)hw
         """
-
         out = self.conv_in(torch.cat([lr_curr, hr_prev_tran], dim=1))
         out = self.resblocks(out)
         out = self.conv_up_cheap(out)
         out = self.conv_out(out)
         # out += self.upsample_func(lr_curr)
-
         return out
 
 
@@ -186,6 +187,28 @@ class FRNet(BaseSequenceGenerator):
 
         # estimate lr flow (lr_curr -> lr_prev)
         lr_flow = self.fnet(lr_curr, lr_prev)
+        # pad if size is not a multiple of 8
+        pad_h = lr_curr.size(2) - lr_curr.size(2) // 8 * 8
+        pad_w = lr_curr.size(3) - lr_curr.size(3) // 8 * 8
+        lr_flow_pad = F.pad(lr_flow, (0, pad_w, 0, pad_h), 'reflect')
+        # upsample lr flow
+        hr_flow = self.scale * self.upsample_func(lr_flow_pad)
+        # warp hr_prev
+        hr_prev_warp = backward_warp(hr_prev, hr_flow)
+        # compute hr_curr
+        hr_curr = self.srnet(lr_curr, space_to_depth(hr_prev_warp, self.scale))
+
+        return hr_curr
+
+    def forward_cache(self, lr_curr, lr_prev, hr_prev, grid):
+        """
+            Parameters:
+                :param lr_curr: the current lr data in shape nchw
+                :param lr_prev: the previous lr data in shape nchw
+                :param hr_prev: the previous hr data in shape nc(4h)(4w)
+        """
+        # estimate lr flow (lr_curr -> lr_prev) 0.1s
+        lr_flow = self.fnet(lr_curr, lr_prev)
 
         # pad if size is not a multiple of 8
         pad_h = lr_curr.size(2) - lr_curr.size(2) // 8 * 8
@@ -196,11 +219,11 @@ class FRNet(BaseSequenceGenerator):
         hr_flow = self.scale * self.upsample_func(lr_flow_pad)
 
         # warp hr_prev
-        hr_prev_warp = backward_warp(hr_prev, hr_flow)
+        hr_prev_warp = backward_warp_cache(hr_prev, hr_flow, grid)
+        # hr_prev_warp = hr_flow
 
         # compute hr_curr
         hr_curr = self.srnet(lr_curr, space_to_depth(hr_prev_warp, self.scale))
-
         return hr_curr
 
     def forward_sequence(self, lr_data):
@@ -264,7 +287,6 @@ class FRNet(BaseSequenceGenerator):
 
                 :return hr_seq: uint8 np.ndarray in shape tchw
         """
-
         # setup params
         tot_frm, c, h, w = lr_data.size()
         s = self.scale
@@ -276,30 +298,42 @@ class FRNet(BaseSequenceGenerator):
         hr_prev = torch.zeros(
             1, c, s * h, s * w, dtype=torch.float32).to(device)
 
+        ng, _, hg, wg = hr_prev.size()
+        iu = torch.linspace(-1.0, 1.0, wg).view(1, 1, 1,
+                                                wg).expand(ng, -1, hg, -1)
+        iv = torch.linspace(-1.0, 1.0, hg).view(1, 1,
+                                                hg, 1).expand(ng, -1, -1, wg)
+        grid = torch.cat([iu, iv], 1).to(device)
+
         self.eval()
-        for i in range(tot_frm):
-            with torch.no_grad():
+        with torch.no_grad():
+            start_idx = 0
+            for i in range(tot_frm):
+                if self.output_hr_frames(hr_frames, start_idx, self.vsr_model.get_save_num()-1):
+                    hr_frames = []
+                    start_idx = i
                 print('[M] forward:', i+1, '/', tot_frm, end='\r')
+                # start = time.perf_counter()
                 lr_curr = lr_data[i: i + 1, ...].to(device)
-                hr_curr = self.forward(lr_curr, lr_prev, hr_prev)
+                hr_curr = self.forward_cache(lr_curr, lr_prev, hr_prev, grid)
                 lr_prev, hr_prev = lr_curr, hr_curr
                 # hr_frm
                 hr_fu = float32_to_uint8_t(hr_curr[0].permute(1, 2, 0))
                 hr_frames.append(hr_fu.to('cpu'))
-                # print(hr_curr)
-                # hr_frm = hr_curr.squeeze(0).cpu().numpy()  # chw|rgb|uint8
+            self.output_hr_frames(hr_frames, start_idx, 0)
 
-            # hr_seq.append(float32_to_uint8(hr_frm))
-        # for hrf in hr_frames:
-            # print(hrf)
-            # hr_frm = hrf.squeeze(0).cpu().numpy()  # chw|rgb|uint8
-            # print(hr_frm)
-            # hr_seq.append(float32_to_uint8(hr_frm))
-            # print(hr_seq[-1])
-            # print(hrf)
-# np your ass
-        # print(torch.stack(hr_frames).permute(0, 2, 3, 1).size())
-        return torch.stack(hr_frames)  # thwc
+        # return hr_frames  # thwc
+
+    def output_hr_frames(self, hr_frames, start_idx, min_output_num):
+        if len(hr_frames) > min_output_num:
+            # print('start', start_idx, 'f', len(hr_frames))
+            # print('start', start_idx, 'f', len(hr_frames))
+            self.vsr_model.save_hr_images(hr_frames, start_idx)
+            return True
+        return False
+
+    def bind_model(self, model: VSRModel):
+        self.vsr_model = model
 
 
 # ------------------ discriminator modules ------------------ #

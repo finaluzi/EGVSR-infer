@@ -9,6 +9,8 @@ from .base_dataset import BaseDataset
 from utils.base_utils import retrieve_files
 from pathlib import Path
 
+import time
+
 
 class LRFolderDataset(BaseDataset):
     def __init__(self, data_opt, opt_out, **kwargs):
@@ -24,7 +26,6 @@ class LRFolderDataset(BaseDataset):
             with open(self.filter_file, 'r') as f:
                 sel_keys = {line.strip() for line in f}
                 self.keys = sorted(list(sel_keys & set(self.keys)))
-        # print(self.keys)
         self.batch_num = 0
         self.cache_num = opt_out['test']['cache_length']
         self.file_list_dict = {}
@@ -43,28 +44,22 @@ class LRFolderDataset(BaseDataset):
         frames_in_dir = len(self.file_list_dict[key])
         if frames_in_dir > end_idx and frames_in_dir-end_idx <= self.pad_num:
             end_idx = frames_in_dir
-            print('[B] Combine batch', self.batch_num, '&', self.batch_num+1)
-        print('[B] batch:', self.batch_num, 'start:', start_idx, 'end:', end_idx, 'all:', frames_in_dir)
-
+            print('[B] Combine batch', self.batch_num, '&',
+                  self.batch_num+1)
+        print('[B] batch:', self.batch_num,
+              'start:', start_idx, 'end:', end_idx, 'all:', frames_in_dir)
         # load lr frames
         lr_seq = []
         file_list = self.file_list_dict[key][start_idx:end_idx]
-        # print(file_list)
-        # Path("/tmp/d/a.dat").name
+
         file_names = list(map(lambda x: Path(x).name, file_list))
         for frm_path in file_list:
-            frm = cv2.imread(frm_path)[..., ::-1].astype(np.uint8)
+            frm = cv2.imread(frm_path)
             lr_seq.append(frm)
-        #  / 255.0
         lr_seq = np.stack(lr_seq)  # thwc|rgb|uint8
-
-        # convert to tensor
-        lr_tsr = torch.from_numpy(np.ascontiguousarray(
-            lr_seq)).to(torch.float32)/255.0  # float32
-        # lr_tsr = lr_tsr.to(torch.float32)/255.0
-        # print('output: ', sorted(os.listdir(osp.join(self.lr_seq_dir, key))))
-        # print('files: ', file_names)
-        # out =
+        lr_seq = lr_seq[..., ::-1]
+        lr_tsr = torch.from_numpy(
+            np.ascontiguousarray(lr_seq)).to(torch.float32)/255.0
         return {
             'lr': lr_tsr,
             'seq_idx': key,

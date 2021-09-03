@@ -41,5 +41,6 @@ test:
 
   # temporal padding
   padding_mode: reflect
-  num_pad_front: 5
-  cache_length: 35
+  num_pad_front: 3
+  cache_length: 500
+  save_images_num: 5
